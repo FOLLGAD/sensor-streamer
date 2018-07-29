@@ -1,10 +1,7 @@
 package com.tentium.sensorstream
 
 import android.Manifest
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.content.SharedPreferences
+import android.content.*
 import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
@@ -17,11 +14,8 @@ import android.widget.*
 import com.github.kittinunf.fuel.Fuel
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
-import org.jetbrains.anko.datePicker
 import org.jetbrains.anko.doAsync
 import java.lang.Exception
-import java.net.URL
-import java.sql.Date
 import java.util.*
 import kotlin.concurrent.scheduleAtFixedRate
 
@@ -33,11 +27,13 @@ class Stream : AppCompatActivity() {
 
     class Prefs (context: Context) {
         val PREFS_FILENAME = "com.tentium.sensorstream.prefs"
+        val sharedPrefs: SharedPreferences = context.getSharedPreferences(PREFS_FILENAME, 0);
+
         val INTERVAL = "interval"
         val HOST = "host"
         val GPS = "gps"
         val BATTERY = "battery"
-        val sharedPrefs: SharedPreferences = context.getSharedPreferences(PREFS_FILENAME, 0);
+        val CLIENTID = "deviceId"
 
         var interval: String
             get() = sharedPrefs.getString(INTERVAL, "")
@@ -51,33 +47,59 @@ class Stream : AppCompatActivity() {
         var battery: Boolean
             get() = sharedPrefs.getBoolean(BATTERY, false)
             set(value) = sharedPrefs.edit().putBoolean(BATTERY, value).apply()
+        var deviceId: String?
+            get() = sharedPrefs.getString(CLIENTID, null)
+            set(value) = sharedPrefs.edit().putString(CLIENTID, value).apply()
+    }
+
+    protected fun getSaltString(): String {
+        val SALTCHARS = "abcdefghijklmnopqrstuvxyz1234567890"
+        val salt = StringBuilder()
+        val rnd = Random()
+        while (salt.length < 8) { // length of the random string.
+            val index = (rnd.nextFloat() * SALTCHARS.length).toInt()
+            salt.append(SALTCHARS[index])
+        }
+        val saltStr = salt.toString()
+        return saltStr
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_stream)
 
+        // INITIALIZE SHARED-PREFERENCES
+        prefs = Prefs(this)
+
+        // INITIALIZE LOCATION PROVIDER
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+
+        // SET TENTIUM LOGO AS WEB LINK
         val img = findViewById(R.id.tentium) as ImageView
         img.setOnClickListener {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://tentium.se/"))
             startActivity(intent)
         }
 
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-
-        val btn: Button = findViewById(R.id.toggleStream) as Button
+        // BUTTON CLICK LISTENER
+        val btn = findViewById(R.id.toggleStream) as Button
         btn.setOnClickListener {
             if (isStreaming) stopStreaming() else startStreaming()
         }
 
-        prefs = Prefs(this)
+        // SET DEVICE ID:
+        var deviceId = prefs!!.deviceId
+        if (deviceId == null) {
+            deviceId = getSaltString()
+            prefs!!.deviceId = deviceId
+        }
+        findViewById<TextView>(R.id.deviceId).text = "Device ID: $deviceId"
 
+        // SET SWITCH STATES & LISTENERS
         val gps = findViewById(R.id.sendGps) as Switch
-        val battery = findViewById(R.id.sendBattery) as Switch
-
         gps.isChecked = prefs!!.gps
+        val battery = findViewById(R.id.sendBattery) as Switch
         battery.isChecked = prefs!!.battery
-
         gps.setOnCheckedChangeListener { _, isChecked ->
             prefs!!.gps = isChecked
         }
@@ -85,12 +107,11 @@ class Stream : AppCompatActivity() {
             prefs!!.battery = isChecked
         }
 
+        // SET INTERVAL & HOST TEXT INPUTS and LISTENERS
         val intervalEditText = findViewById(R.id.interval) as EditText
         intervalEditText.setText(prefs!!.interval)
-
         val hostEditText = findViewById(R.id.host) as EditText
         hostEditText.setText(prefs!!.host)
-
         hostEditText.addTextChangedListener(object: TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -107,9 +128,10 @@ class Stream : AppCompatActivity() {
         })
     }
     private fun startStreaming() {
+        isStreaming = true
+
         val btn: Button = findViewById(R.id.toggleStream) as Button
         btn.text = "Stop streaming"
-        isStreaming = true
 
         val hostEditText = findViewById(R.id.host) as EditText
         val host = hostEditText.text.toString()
@@ -134,15 +156,21 @@ class Stream : AppCompatActivity() {
 
         prefs!!.host = host
 
+        val deviceId = prefs!!.deviceId as String
+
         doAsync {
-            timer = Timer()
-            timer.scheduleAtFixedRate(0, interval) { sendPost(host, gps.isChecked, battery.isChecked) }
+            // Run timer in async to enable background (i think)
+            timer = Timer() // Initialize new timer for some reason
+            timer.scheduleAtFixedRate(0, interval) {
+                // Run this every N ms:
+                sendPost(host, gps.isChecked, battery.isChecked, deviceId)
+            }
         }
     }
     private fun stopStreaming() {
+        isStreaming = false
         val btn: Button = findViewById(R.id.toggleStream) as Button
         btn.text = "Start streaming"
-        isStreaming = false
 
         timer.cancel()
     }
@@ -150,12 +178,10 @@ class Stream : AppCompatActivity() {
         val ret = if (boolean) 1 else 0
         return ret
     }
-    private fun sendPost(host: String, gps: Boolean, battery: Boolean) {
-        val obj = URL("http://$host")
-
+    private fun sendPost(host: String, gps: Boolean, battery: Boolean, deviceId: String) {
         val millis: Long = Calendar.getInstance().timeInMillis
 
-        var body = """{ "timestamp": $millis,"""
+        var body = """{ "timestamp": $millis, "deviceId": "$deviceId","""
 
         var toFinish = boolToInt(gps) + boolToInt(battery)
         var isFinished = 0
@@ -182,6 +208,7 @@ class Stream : AppCompatActivity() {
                     body += """"gps": { "lat" : $lat, "long": $long, "alt": $alt },"""
                     proceed()
                 }.addOnFailureListener { exception: Exception ->
+                    println(exception)
                     body += """"gps": {},"""
                     proceed()
                 }
